@@ -9,8 +9,8 @@
     "dev": "nodemon api/app.js"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.0",
-    "axios": "^1.x.x",
+    "@google/genai": "^1.40.0",
+    "axios": "^1.12.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2"

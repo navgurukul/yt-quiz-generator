@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import axios from "axios";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 // import { getYouTubeTranscript } from "./transcript.js";
 import dotenv from "dotenv";
 dotenv.config();
@@ -10,109 +10,76 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API);
-
-// Modified schema with fewer minimum questions
-const schema = {
-    description: "A list of multiple-choice questions generated from the given text.",
-    type: "array",
-    minItems: 10,   // Reduced from 10 to 5
-    maxItems: 10,
-    items: {
-        type: "object",
-        description: "A multiple-choice question with four options and one correct answer.",
-        properties: {
-            question: {
-                type: "string",
-                description: "The question text. Should be clear and based on the transcript content."
-            },
-            options: {
-                type: "array",
-                minItems: 4,
-                maxItems: 4,
-                items: { type: "string" },
-                description: "Four answer choices, including one correct answer."
-            },
-            correctAnswer: {
-                type: "string",
-                description: "The correct answer, which must be one of the options."
-            },
-            confidence: {
-                type: "number",
-                minimum: 0,
-                maximum: 1,
-                description: "Confidence score (0-1)."
-            }
-        },
-        required: ["question", "options", "correctAnswer", "confidence"],
-    }
-};
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API });
 
 async function generateQuestions(videoId) {
     try {
-        // // Clean transcript further to improve processing
-        // const cleanedTranscript = transcript
-        //     .replace(/(\w+)\s\1\s\1/g, '$1 $1') // Remove triple repeated words
-        //     .replace(/(\w+)\s\1/g, '$1')        // Remove double repeated words
-        //     .replace(/\s{2,}/g, ' ')           // Remove multiple spaces
-        //     .trim();
-
         const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-        const prompt = `
-        Generate multiple-choice educational quiz questions based on this YouTube video:
+        const prompt = `Generate multiple-choice educational quiz questions based on this YouTube video:
 
-        GUIDANCE FOR GENERATING GOOD QUESTIONS:
-        1. Create questions about key concepts, facts, definitions, or ideas.
-        2. Make questions clear and specific - each should stand on its own without needing additional context.
-        3. For each question, provide exactly 4 options with only one correct answer.
-        4. Focus on the main educational content in the video content.
-        5. Assign higher confidence scores (0.7+) to questions about clearly stated information.
-        6. If the content is technical or specialized, include necessary context within the question.
-        7. Avoid creating questions about ambiguous or unclear parts of the video content.
-        
-        Remember to create educational questions that test understanding of the content.`;
+GUIDANCE FOR GENERATING GOOD QUESTIONS:
+1. Create questions about key concepts, facts, definitions, or ideas.
+2. Make questions clear and specific - each should stand on its own without needing additional context.
+3. For each question, provide exactly 4 options with only one correct answer.
+4. Focus on the main educational content in the video content.
+5. Assign higher confidence scores (0.7+) to questions about clearly stated information.
+6. If the content is technical or specialized, include necessary context within the question.
+7. Avoid creating questions about ambiguous or unclear parts of the video content.
 
+Remember to create educational questions that test understanding of the content.
 
-        const model = genAI.getGenerativeModel({
-            model: "gemini-2.0-flash",
-            generationConfig: {
-                responseMimeType: "application/json",
-                responseSchema: schema,
-                temperature: 0.2,  // Slightly increased for more variety
-                maxOutputTokens: 8000,
-            }
+Return a JSON array of questions with the following structure:
+[
+  {
+    "question": "The question text",
+    "options": ["option1", "option2", "option3", "option4"],
+    "correctAnswer": "the correct option",
+    "confidence": 0.8
+  }
+]`;
+
+        const contents = [
+            {
+                fileData: {
+                    fileUri: videoUrl,
+                },
+            },
+            { text: prompt }
+        ];
+
+        const response = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: contents,
         });
 
-        const result = await model.generateContent({
-            contents: [{
-                role: 'user',
-                parts: [
-                    {
-                        text: prompt
-                    }, 
-                    {
-                        fileData: {
-                            mimeType: 'video/mp4',
-                            fileUri: videoUrl,
-                        }
-                    }
-                ]
-            }]
-        });
-
-
-        if (!result.response || !result.response.text) {
+        if (!response || !response.text) {
             throw new Error("Invalid response from AI model.");
         }
 
         // Parse and validate questions
         let questions;
         try {
-            questions = JSON.parse(result.response.text());
+            // Extract JSON from response text (might be wrapped in markdown code blocks)
+            let jsonText = response.text.trim();
+            
+            // Remove markdown code block if present
+            if (jsonText.startsWith('```json')) {
+                jsonText = jsonText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+            } else if (jsonText.startsWith('```')) {
+                jsonText = jsonText.replace(/^```\s*/, '').replace(/\s*```$/, '');
+            }
+            
+            questions = JSON.parse(jsonText);
         } catch (e) {
             console.error("Failed to parse JSON response:", e);
+            console.error("Response text:", response.text);
             throw new Error("AI returned invalid JSON. Please try another video.");
+        }
+
+        // Ensure questions is an array
+        if (!Array.isArray(questions)) {
+            throw new Error("AI response is not an array of questions.");
         }
 
         // Filter to questions with reasonable confidence levels - more lenient now
@@ -121,9 +88,10 @@ async function generateQuestions(videoId) {
         // Apply basic validation
         const validQuestions = acceptableQuestions.filter(q => {
             // Question must have reasonable length
-            if (q.question.length < 20) return false;
+            if (!q.question || q.question.length < 20) return false;
 
             // Options should be all present and distinct
+            if (!q.options || !Array.isArray(q.options)) return false;
             const uniqueOptions = new Set(q.options);
             if (uniqueOptions.size !== 4) return false;
 
